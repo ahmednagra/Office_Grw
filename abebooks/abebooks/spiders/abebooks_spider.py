@@ -1,3 +1,5 @@
+import re
+import json
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -11,16 +13,16 @@ class AbeBooksSpider(scrapy.Spider):
     start_urls = ['https://www.abebooks.com/servlet/BookstoreSearch']
 
     custom_settings = {
-    'FEEDS': {
-        'Abebooks/%(name)s/%(name)s_%(time)s.csv': {
-            'format': 'csv',
-            # 'encoding' : 'utf-8',
-            'fields': ['Country', 'seller_name', 'address', 'phone_No', 'join_date', 'rating', 
-                                 'information', 'seller_id', 'seller_url', 'seller_image_url', 'collection_by_User']
-                    }
-                }
+        'FEEDS': {
+            'Abebooks/%(name)s/%(name)s_%(time)s.json': {
+                'format': 'json',
+                # 'encoding' : 'utf-8',
+                'fields': ['Country', 'seller_name', 'address', 'phone_No', 'join_date', 'rating',
+                           'information', 'seller_id', 'seller_url', 'seller_image_url', 'collection']
             }
-    
+        }
+    }
+
     def parse(self, response):
         countries = ['AUS', 'ITA', 'USA']
         for country in countries:
@@ -37,11 +39,11 @@ class AbeBooksSpider(scrapy.Spider):
                 callback=self.parse_sellers,
                 meta={'country': country}
             )
-        
+
     def parse_sellers(self, response):
         seller_links = response.css('#search-results-target > li > strong > a::attr(href)').getall()
-        print('seller_links' , len(seller_links))
-        
+        print('seller_links', len(seller_links))
+
         for seller_link in seller_links:
             yield scrapy.Request(
                 url=seller_link,
@@ -62,18 +64,52 @@ class AbeBooksSpider(scrapy.Spider):
         item = AbebooksItem()
 
         item['Country'] = response.meta['country']
-        item['seller_name'] = response.css('div.seller-location h1::text').extract_first().strip()
-        # item['address'] = response.css('p.icon.addy::text ').extract_first().strip()
-        item['address'] = ''.join(part.strip() for part in response.css('p.icon.addy *::text').extract() if part.strip())
+        item['seller_name'] = response.css('div.seller-location h1::text').get().strip()
+        item['address'] = ''.join(part.strip() for part in response.css('p.icon.addy *::text').getall() if part.strip())
         item['phone_No'] = response.css('p.icon.telly::text ').get()
-        item['join_date'] = datetime.strptime(response.css('p.date-joined::text').get().replace('Joined', '').strip(), '%B %d, %Y').strftime('%d:%m:%Y')
-        item['rating'] = response.css('.seller-location.indent div a img::attr(alt)').get().replace('-star rating', '')
+        joindate = response.css('p.date-joined::text').get('')
+        item['join_date'] = datetime.strptime(joindate.replace('Joined', '').strip(), '%B %d, %Y').strftime(
+            '%d /%m /%Y') if joindate else None
+        rating = response.css('.seller-location.indent div a img::attr(alt)').get('')
+        item['rating'] = re.sub('-star rating', '', rating) if rating else None
         item['information'] = response.css('.panel-body.seller-content p::text').get()
-        item['seller_id'] = response.css('link[rel="canonical"]::attr(href)').get().split('/')[-2]
+        seller_id = response.css('link[rel="canonical"]::attr(href)').get('').split('/')[-2]
+        item['seller_id'] = seller_id
         item['seller_url'] = response.css('link[rel="canonical"]::attr(href)').get()
         item['seller_image_url'] = response.css('#main > div.seller-info.liquid-static-col > img::attr(src)').get()
-        collection_by_User_link = response.css('#seller-collections div div a img::attr(src)').getall()
-        values = response.css('.card-block.text-center h4::text, .card-block.text-center p small::text').getall()
-        item['collection_by_User'] = {f"{values[i]}_{values[i+1]}": collection_by_User_link[i//2] for i in range(0, len(values)-1, 2)}
+        names = response.css('.card-block.text-center  h4::text').getall()
+        Links = response.css('div.collection-card a::attr(href)').getall()
+        item['collection'] = [{'name': name, 'url': urljoin(response.url, link)}
+                              for name, link in zip(names, Links)]
 
-        yield item
+        # Check for "Show more" button and fetch additional records
+        show_more_button = response.css('button#load-more-seller')
+        print('show_more_button', show_more_button)
+        if show_more_button:
+            print('before the response. follow')
+            # time.sleep(3)
+            offset = 2
+
+            yield response.follow(f'https://www.abebooks.com/collections/curator/{seller_id}?offset={offset}',
+                                  self.show_more_records, meta={'item': item, 'offset': offset, 'seller_id': seller_id})
+        else:
+            yield item
+
+    def show_more_records(self, response):
+        item = response.meta['item']
+        seller_id = response.meta['seller_id']
+        data = json.loads(response.text)
+        resp = data['relatedCollections']
+
+        if resp:
+            names = [field['curatorName'] for field in resp]
+            links = [field['relativeUrl'] for field in resp]
+            more_records = [{'name': name, 'url': urljoin(response.url, link)} for name, link in zip(names, links)]
+            item['collection'].extend(more_records)
+
+            offset = int(response.url.split('=')[-1]) + 1
+            yield response.follow(f'https://www.abebooks.com/collections/curator/{seller_id}?offset={offset}',
+                                  self.show_more_records,
+                                  meta={'item': item, 'offset': offset, 'seller_id': item['seller_id']})
+        else:
+            yield item

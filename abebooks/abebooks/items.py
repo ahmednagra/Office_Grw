@@ -18,5 +18,5 @@ class AbebooksItem(scrapy.Item):
     seller_id = scrapy.Field()
     seller_url = scrapy.Field()
     seller_image_url = scrapy.Field()
-    collection_by_User = scrapy.Field()
+    collection = scrapy.Field()
     pass
