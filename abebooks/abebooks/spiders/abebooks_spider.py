@@ -1,5 +1,5 @@
-import re
 import json
+import re
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -26,19 +26,10 @@ class AbeBooksSpider(scrapy.Spider):
     def parse(self, response):
         countries = ['AUS', 'ITA', 'USA']
         for country in countries:
-            formdata = {
-                'ph': '2',
-                'cm_sp': 'SearchF-_-sellers-_-Results',
-                'name': '',
-                'country': country,
-                'postalcode': ''
-            }
-            yield scrapy.FormRequest(
-                url='https://www.abebooks.com/servlet/BookstoreSearch',
-                formdata=formdata,
-                callback=self.parse_sellers,
-                meta={'country': country}
-            )
+            url = f'https://www.abebooks.com/servlet/BookstoreSearch?ph=2&searchtype=1&country={country}&provstate=-1' \
+                  f'&currpage=1 '
+            print('url :', url)
+            yield scrapy.Request(url=url, callback=self.parse_sellers, meta={'country': country})
 
     def parse_sellers(self, response):
         seller_links = response.css('#search-results-target > li > strong > a::attr(href)').getall()
@@ -87,7 +78,6 @@ class AbeBooksSpider(scrapy.Spider):
         print('show_more_button', show_more_button)
         if show_more_button:
             print('before the response. follow')
-            # time.sleep(3)
             offset = 2
 
             yield response.follow(f'https://www.abebooks.com/collections/curator/{seller_id}?offset={offset}',
@@ -98,12 +88,16 @@ class AbeBooksSpider(scrapy.Spider):
     def show_more_records(self, response):
         item = response.meta['item']
         seller_id = response.meta['seller_id']
-        data = json.loads(response.text)
-        resp = data['relatedCollections']
+        try:
+            data = json.loads(response.text)
+            resp = data.get('relatedCollections')
+        except Exception as error:
+            print(f'Error loading JSON data: {error}')
+            resp = None
 
         if resp:
-            names = [field['curatorName'] for field in resp]
-            links = [field['relativeUrl'] for field in resp]
+            names = [field.get('curatorName', '') for field in resp]
+            links = [field.get('relativeUrl', '') for field in resp]
             more_records = [{'name': name, 'url': urljoin(response.url, link)} for name, link in zip(names, links)]
             item['collection'].extend(more_records)
 
